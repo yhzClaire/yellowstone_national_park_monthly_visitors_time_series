@@ -11,3 +11,8 @@ The park is open to the public 24/7 all year round. Every year there are more th
 # Hypothesis:
 * There are time-related trends in the number of visitors to Yellowstone National Park.
 * Number of visitors to YNP might also affected by temperature and oil price.
+
+# Data Source:
+* Monthly Visitors to Yellowstone Nation Park: [Integrated Resource Management Applications (IRMA)]("https://irma.nps.gov/STATS/SSRSReports/Park%20Specific%20Reports/Recreation%20Visitors%20By%20Month%20(1979%20-%20Last%20Calendar%20Year)?Park=YELL")
+* Month Temperature: [National Center for Environmental Information ]("https://www.ncdc.noaa.gov/cdo-web/")
+* Gas Price: [U.S. Energy Information Administration]("https://www.eia.gov/totalenergy/data/browser/index.php?tbl=T09.04#/?f=M&start=197911&end=202001&charted=5-10-11")
