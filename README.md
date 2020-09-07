@@ -1,6 +1,8 @@
 # yellowstone_national_park_monthly_visitors_time_series
 Time Series Analysis on Yellowstone National Park Monthly Visitors
 
+See [R Markdown file of this project](https://yhzclaire.github.io/yellowstone_national_park_monthly_visitors_time_series/)
+
 # Problem Statement 
 To identify patterns and trends of monthly visitors to Yellowstone National Park and forecast next 12-month visitors
 
