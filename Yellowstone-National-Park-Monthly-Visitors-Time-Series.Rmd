@@ -1,0 +1,931 @@
+---
+title: "Yellowstone National Park Monthly Visitors Time Series Project"
+author: "Claire"
+date: "4/8/2020"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+# Problem Statement 
+To identify patterns and trends of monthly visitors to Yellowstone National Park and forecast next 12-month visitors
+
+I was very lucky to have a chance to visit the Yellowstone National Park with a friend during the week of July 4th, 2019. I had such a wonderful experience visiting Park. I remember how much I enjoyed walking around the park and seeing those beautiful and colorful hot springs and geysers basins, and how excited I was when we  run into our natural friends, bisons and deers, multiple times. 
+
+The park is open to the public 24/7 all year round. Every year there are more than 4 millions visitors to the Park, and number is growing year by year(might not held true for 2020 due to Covid). It would be great if we can make up-to-date forecast of visitor volumn to help the park service team to better plan and allocate resources. Being able to predict visitor volumn will help us not only plan for construction and/or maintaining of roads, lodges and campgrouds, but also reserve time for recovery of the Park. Ultmiately we hope to preserve the ecosystem (the natures and wildlife) and sustain the beauty of the Park to all visitors for many generations to come. I had a chance to work with a team to perform time series analysis on number of monthly visitors to Yellowstone National Park and build machine learning models to forecast next 12 month's number of visitors.
+
+Data Source:
+* Monthly Visitors to Yellowstone Nation Park: [Integrated Resource Management Applications (IRMA)](https://irma.nps.gov/STATS/SSRSReports/Park%20Specific%20Reports/Recreation%20Visitors%20By%20Month%20(1979%20-%20Last%20Calendar%20Year)?Park=YELL)
+* Month Temperature: [National Center for Environmental Information](https://www.ncdc.noaa.gov/cdo-web/)
+* Gas Price: [U.S. Energy Information Administration](https://www.eia.gov/totalenergy/data/browser/index.php?tbl=T09.04#/?f=M&start=197911&end=202001&charted=5-10-11)
+
+Load Necessary Libraries
+```{r message=FALSE}
+library("fma")
+library("fpp")
+library("forecast")
+library("TSA")
+library("zoo")
+library(lubridate)
+library("ggplot2")
+library("MLmetrics")
+library("imputeTS")
+library("gdata")
+library("readxl")
+library("GGally")
+#library("MLmetrics")
+library(dplyr)
+library(Metrics)
+library(dygraphs)
+library("tseries")
+accuracy <- forecast::accuracy
+library("urca")
+library(tidyverse)
+library(tsibble)
+library("vars")
+```
+
+# Load Data and Preparation
+Read the raw dataset and convert it to time series data
+```{r}
+rawdata <- read.csv("FINAL_CLEAN_DATASET.csv")
+head(rawdata)
+dfts <-  ts(rawdata$Visitors ,  start=c(1979, 1), end = c(2018,12),frequency = 12)
+head(dfts,24)
+
+save(dfts, file= "ts_yellow_stone_park.Rdata")
+#load(file = "ts_yellow_stone_park.Rdata")
+```
+
+
+
+# Train Test Split
+
+Split data into train and test set
+* Train Set : 1979-2017 (39 years : 468 months )
+* Test Set : 2018 (1 year : 12 months)
+```{r}
+
+train <- window(dfts, start = c(1979, 1), end = c(2017, 12), frequency = 12 )
+test <- window(dfts, start = c(2018, 1), end = c(2018, 12), frequency = 12 )
+
+```
+# Data Exploratory Analysis
+
+## Data visualization & basic stats
+
+First Impression of the data : 
+* Compute mean and variance
+* Create time series plot for number of visitors (monthly)
+
+We can see there is strong seasonality, the variance of data increases over time, and there is tiny upward trend in the data.
+
+```{r}
+mean(train)
+var(train)
+autoplot(train, main = "Monthly Number of Visitors to Yellow Stone National Park",
+         xlab = "Year", ylab="Visitors")
+```
+
+
+## Data Decomposition
+
+Let's take a closer look by breaking down the data and see what are the components.
+I created Additive and Multiplicative Decomposition plots. Both Decomposition plots show there is a upward linear trend(second component), strong seasonality (third component) and some randomnese (4th component) in the data. Compare between additive and multiplicative decomposition, I think the multiplicative one is a better representation of the data as the last component "random" looks more like a white nosie than that of the additive decomposition. 
+```{r}
+decom <- decompose(train)
+plot(decom)
+decom_add <- decompose(train, type = c("additive"))
+plot(decom_add)
+decom_mul <- decompose(train, type = c("multiplicative"))
+plot(decom_mul)   
+
+```
+
+## Seasonality component 
+Let's take a look at the seasonality component of the data by creating seasonal plot
+Here is what we see:
+- Repeated seasonality within each year
+- November to April : low season
+- May to October : busy season with peak in July
+```{r}
+seasonplot(train,  type = "o",
+            main="Seasonal Plot : Visitors to Yellow Stone Park", ylab = "Visitors",
+           xlab = "Month", col = 4)
+```
+
+
+## Box-cox transformation
+
+We noticed that the variance of the data increases over years. Let's address this with Box-cox transformation.
+```{r}
+lambda_t <- BoxCox.lambda(train)
+lambda_t
+cbind("Before Transformation" = train,
+      "Box-cox transformed" = BoxCox(train, lambda = "auto")) %>%
+  autoplot(facets=TRUE) +
+  xlab("Year") + ylab("") +
+  ggtitle("Number of Visitors to Yellow Stone Park")
+```
+
+## Is the data staionary ? 
+
+### Check ACF and PACF plots 
+
+Here is the ADF and PACF plot of the data. We can see that the data is not stationary as there is sinusoid pattern(sine wave) in ACF plot and the values at lag-1 of lag-2 of PACF are significant. We will come back to this with differencing to remove/reduce non-stationarity. 
+```{r}
+# Display the data in time-series plot and ACF and PACF plot
+ggtsdisplay(train,main='No.Of Visitors')
+# Another way to display the data in time-series plot and ACF and PACF plot
+tsdisplay(train)
+# ACF plot
+acf(train,  48)
+# PACF plot
+pacf(train,  48)
+```
+
+### Test for stationary
+
+#### **Augmented Dickey-Fuller Test ** 
++  H0 (Null Hypothesis) : time series is **NOT** a level or trend stationary univariate time series
++  H1 (Alternate Hypothesis) :time series is a level or trend stationary univariate time series  
+
+As the p-value of ADF test is smaller than 0.01 (<0.05), we reject the null hypothesis and accept the alternative hypothesis, meaning that the ADF test tells us that the  data is level or trend stationary.
+```{r}
+adf.test(train)
+```
+
+
+#### KPSS test
+
+##### KPSS - short version of the truncation lag 
++  H0 (Null Hypothesis) : time series is a level or trend stationary univariate time series
++  H1 (Alternate Hypothesis) : time series is NOT a level or trend stationary univariate time series
+
+The p-value of the KPSS test is slightly greater than 0.05, which suggest that there is no enough evidence to reject the null hypothesis if we are following the p-value as of 0.05 threshold. The KPSS test suggests that data is level or trend stationary.
+```{r}
+kpss.test(train,null = c("Level", "Trend"))
+```
+
+##### KPSS Test - long version of the truncation lag 
+The p-value is smaller than 0.01 once we specify the long version of the truncation lag is used by changing lshort parameter from TRUE(default) to FALSE. Therefore, KPSS test with longer lag suggests the time series **is not stationary**.
+
+```{r}
+kpss.test(train,null = c("Level", "Trend"), lshort='FALSE')
+```
+
+**We see conflicting results from the three tests above(ADF test, KPSS test and KPSS test with longer lag). While the ACF and PACF plots shows there are signs of auto-coorelation with the data. There is a seasonal pattern which needs to be extracted from the data to improve modelling. We will proceed with differencing to remove the seasonal pattern. **
+
+### What ACF and PACF plots tell us about stationarity?
+Here we can see a sine-curve pattern at the ACF plot with significant spikes at lag-1, lag-12, 24, 36, 48  which indicates at least the time series has seasonal component and is Not stationary.
+```{r}
+tsdisplay(train, lag.max = 48)
+
+```
+
+
+### Differencing to acheive stationarity
+
+#### Differencing-1: nonseasonal order = 1 , seasonal order = 0
+
+Here I only applied normal differencing with order equal to 1 on the data, however seasonality remains in the data after applying it.
+
+```{r}
+dff.1 <- diff(train, lag = 1, differences =1 )
+tsdisplay(dff.1, main="Differencing : nonseasonal order = 1 , seasonal order = 0")
+```
+
+Since seasonality is strong in this time series, it is recommended that seasonal differencing be done first then normal differencing, because sometimes the resulting series will be stationary and there will be no need for further first difference. Let's try this.
+
+#### Differencing-2 : nonseasonal order = 0, seasonal order =  1
+
+Applying 1st order seasonal differencing removes the seasonality from the time series. We see there is a significant spikes at lag 1 in the PACF plot , none beyond lag 1 and the ACF is exponentially decayig after we applied 1st order seasonal differencing on the time series. This signals the data may contains an autoregressive component with order of 1. 
+
+```{r}
+dff.2 <- diff(train, lag = 12, differences =1 )
+tsdisplay(dff.2, main="Differencing nonseasonal order = 0, seasonal order =  1")
+
+```
+
+
+Let's apply another differencing, 1st order normal differencing on the top of 1st-order-seasonal-differenced data.
+
+#### Differencing-3 : seasonal order = 1, nonseasonal order = 1 
+
+We see that the spike at lag-1 on the ACF plot actually points downward, autocorrelation of lag-1 changed from positive to negative, after applying the second differencing (1st order normal differencing), indicating that we might be over-differencing the time series. I decided to pursue only one differencing, first order seasonal differencing, as the differencing of choice. 
+
+```{r}
+# 1st order Seasonal Differencing followed by 1st order Normal Differencing
+dff.3 <- diff(dff.2, lag = 1, differences = 1)
+tsdisplay(dff.3 , main="Differencing : nonseasonal order = 1 , seasonal order =  1")
+```
+
+
+#### Final Decided Differencing :  nonseasonal order = 0 , seasonal order =  1
+```{r}
+dff <- diff(train, lag = 12, differences = 1)
+tsdisplay(dff, main="1st order Seasonal Differenced", lag.max = 48)
+```
+
+
+# Modeling
+
+## Metrics for Model Evaluation
+
+For this project, I choose the following metrics:
+* RMSE as the primary metrics
+* MAPE and AICc(if available) as complementary
+
+## Base model- Seasonal naive modele
+
+Train Seasonal naive model
+```{r}
+fc.snaive <- snaive(train, h=12)
+fc.snaive$model
+```
+
+Forecast by the seasonal naive method
+```{r}
+fc.snaive$mean
+autoplot(fc.snaive)
+```
+
+check model fitness
+We forecast the number of visitors for next 12 month and compare the forecasted value with our test set.
+```{r}
+#check forecast errors
+Box.test(fc.snaive, lag = 12,type = c("Ljung-Box"))
+checkresiduals(fc.snaive, lag=12)
+accuracy(fc.snaive, test)
+```
+How was our base model(seasonal naive) performing ?
+**As the p-value of Ljung_box test is smaller than 0.05, we rejects the null hypothesis that the time series isn't autocorrelated, and therefore the residuals of snaive mode doesn't qualified as white noise. Therefore we note that there is room for improvement because there are still patterns within the data that's not captured by the seasonal naive model.**
+
+## Exponential Smoothing: ETS & Holt-Winters Method
+
+### Simple exponential smoothing
+```{r}
+fit_ses <- ses(train, h = 12)
+fit_ses$model
+
+#check model fitness - ses
+checkresiduals(fit_ses, lag=12)
+accuracy(fit_ses, test)
+```
+
+### Holt’s linear trend method
+```{r}
+
+fit_holt <- holt(train, h=12)
+fit_holt$model
+
+checkresiduals(fit_holt, lag=12)
+accuracy(fit_holt, test)
+```
+
+### Holt-Winters seasonal method - additive
+```{r}
+fit_hwa <- hw(train, seasonal ="additive", h=12)
+fit_hwa$model
+
+checkresiduals(fit_hwa)
+accuracy(fit_hwa, test)
+
+```
+
+### Holt-Winters seasonal method - multiplicative
+```{r}
+fit_hwm <- hw(train, seasonal ="multiplicative", h=12)
+fit_hwm$model
+
+checkresiduals(fit_hwm)
+accuracy(fit_hwm, test)
+```
+
+### Holt-Winters seasonal method - additive - damped
+```{r}
+fit_hwad <- hw(train, seasonal ="additive", h=12, damped =TRUE)
+fit_hwad$model
+
+checkresiduals(fit_hwad)
+accuracy(fit_hwad, test)
+
+```
+
+### Holt-Winters seasonal method - multiplicative - damped
+```{r}
+fit_hwmd <- hw(train, seasonal ="multiplicative", h=12,  damped =TRUE)
+fit_hwmd$model
+
+checkresiduals(fit_hwmd)
+accuracy(fit_hwmd, test)
+```
+
+### Compare base-line model with 6 exponential smoothing models
+
+**Compare Test RMSE of holt's linear , holt-winters' seasonal models with the seasonal naive model(baseline)**
+* Noticed that the simple exponential smooothing(ses) model and holt's linear trend model actually are not better than the base model as the RMSEs of ses and holt models are greater than the base model.  
+* Tow models outperforms the baseline model:Holt-Winters' additive damped method and Holt-Winters' multiplicative damped method
+```{r}
+modelname <- c("snaive","ses","holt", "hw-add","hw-add-damp", "hw-mul","hw-mul-damp")
+
+as.data.frame( cbind (modelname ,
+              "RMSE"= round(c(accuracy(fc.snaive, test)["Test set",2], 
+                              accuracy(fit_ses, test)["Test set",2], 
+                              accuracy(fit_holt, test)["Test set",2],
+                              accuracy(fit_hwa, test)["Test set",2],
+                              accuracy(fit_hwad, test)["Test set",2],
+                              accuracy(fit_hwm, test)["Test set",2],
+                              accuracy(fit_hwmd, test)["Test set",2]),2),
+               "MAPE(%)"= round(c(accuracy(fc.snaive, test)["Test set",5], 
+                              accuracy(fit_ses, test)["Test set",5], 
+                              accuracy(fit_holt, test)["Test set",5],
+                              accuracy(fit_hwa, test)["Test set",5],
+                              accuracy(fit_hwad, test)["Test set",5],
+                              accuracy(fit_hwm, test)["Test set",5],
+                              accuracy(fit_hwmd, test)["Test set",5]),2) ))
+
+```
+The best model from the 7 models above is Holt-Winters' multiplicative damped method. However the residuals of this model doesn't pass the Ljung-Box test, indicating the residuals is not white noise and there are still patterns remains in the residuals.
+```{r}
+checkresiduals(fit_hwmd)
+plot(fit_hwmd)
+```
+
+## State space models for exponential smoothing with ets()
+Let's see what model will be selected by R ets() function.
+
+#### ETS() method without Box-Cox transformation
+The model selected by ETS() is multiplicative Error with multiplicative seasonality.
+```{r}
+fit_ets <- ets(train)
+summary(fit_ets)
+checkresiduals(fit_ets)
+```
+
+#### ETS() method with Box-Cox transformation
+Calculate train set lambda value 
+```{r}
+lambda_t <- BoxCox.lambda(train)
+lambda_t
+```
+
+The model selected by ETS() with box-cox tranformed training data is Additive Error with additive seasonality.
+```{r}
+fit_ets_t <- ets(train, lambda = lambda_t)
+summary(fit_ets_t)
+checkresiduals(fit_ets_t)
+```
+Compare ETS models with and withoouot box-cox transformation:
+* the AICc value is much lower on the ets model when the data is Box-Cox transformed.
+```{r}
+as.data.frame(cbind("ETS() model"=c("Not-transformed", "Box-Cox-transformed") , "AICc"= c(fit_ets$aicc, fit_ets_t$aicc)))
+```
+* the prediction error on test set(RMSE and MAPE) is lower for model with box-cox transformation
+```{r}
+fc_ets<-forecast(fit_ets ,h=12)
+
+fc_ets_t<-forecast(fit_ets_t ,h=12)
+
+accuracy(fc_ets, test)
+
+accuracy(fc_ets_t, test)
+```
+Based on the Test RMSE, ETS model with Box-Cox transformation is better in forecasting next 12-month visitors than the ETS model without box-cox transformation.  However the residual of both models doesn't pass the white noise test. 
+
+
+
+** Between Seasonal Naive(base model), Holt-Winters' Multiplicative Damped method and Exponential Smoothing State Space Model (Additive seasonal component and additive error), the best model is Holt-Winters' Multiplicative Damped method so far as it has the lowest test error (RMSE and MAPE).**
+```{r}
+as.data.frame(cbind("Model"=c( "Seasonal Naive (base model) ", "Holt-Winters' Multi Damped", "ETS(A,N,A) Box-Cox" ) ,
+                    "AICc"= round( c( 0/0,  fit_hwmd$model$aicc,  fit_ets_t$aicc) , 2) ,
+                    "RMSE" = round( c(accuracy(fc.snaive, test)["Test set",2] , accuracy(fit_hwmd, test)["Test set",2], 
+                                      accuracy(fc_ets_t, test)["Test set", 2]), 2),
+                    "MAPE(%)" = round( c(accuracy(fc.snaive, test)["Test set",5] , accuracy(fit_hwmd, test)["Test set",5], accuracy(fc_ets_t, test)["Test set", 5]), 2) ))
+
+
+```
+
+
+## Arima/sArima model
+
+ACF and PACF plots can help us in choosing an appropriate Arima model
+```{r}
+tsdisplay(dfts)
+```
+
+Confirm applying frist order of seasonal differencing gives us a staionary data
+```{r}
+dff <- diff(train, lag = 12, differences = 1)
+tsdisplay(dff, main="1st order Normal Differenced", lag.max = 48)
+
+```
+Interpreting the ACF and PACF plots above:
+* Applying 1st order seasonal differencing with lag=12, which means we have seasonal Arima model 
+* Exponential series decaying at ACF plot and sharp cut off at lag=1 on PACF plot implying nonseasonal Auto Regressive AR(1).
+* Exponential decaying at lag=12, 24, 36 in PACF plot and sharp cut off at lag=12 on ACF plot implying seasonal MA(1)
+**ACF and PACF plots imply a SARIMA (1,0,0)(0,1,1)[12] model** 
+
+### Arima Model 1 : (1,0,0)(0,1,1)[12]
+```{r}
+
+fit_arima_1 <-Arima(train,order=c(1,0,0),seasonal=list(order=c(0,1,1),period=12),lambda = lambda_t)
+summary(fit_arima_1)
+checkresiduals(fit_arima_1)
+
+```
+Model Goodness of Fit: Arima Model 1 : (1,0,0)(0,1,1)[12] 
+```{r}
+fit_arima_1_fc <- forecast(fit_arima_1 ,h = 12)
+autoplot(fit_arima_1_fc)+ xlab("Year") + ylab("Number of Visitors")
+accuracy(fit_arima_1_fc, test)
+mase(test,fit_arima_1_fc$mean)
+```
+
+### Auto.Arima
+Then, let's use auto.arima function
+```{r}
+fit_autoarima <- auto.arima(train, stepwise = FALSE, approximation = FALSE, lambda = lambda_t) 
+```
+
+```{r}
+summary(fit_autoarima)
+```
+
+auto.arima: (1,0,2)(1,1,1)[12]
+```{r}
+checkresiduals(fit_autoarima)
+autoplot(fit_autoarima)
+```
+Model Goodness of Fit : Arima Model 2 : (1,0,2)(1,1,1)[12]
+```{r}
+fit_arima_2_fc <- forecast(fit_autoarima ,h = 12)
+autoplot(fit_arima_2_fc)+ xlab("Year") + ylab("Number of Visitors")
+accuracy(fit_arima_2_fc, test)
+mase(test,fit_arima_2_fc$mean)
+
+```
+
+
+
+### Loop for the best ARIMA model
+Find the best Arima model by trying different combinations of autoregressive and moving average order and number of normal and seasonal differencing. As we dicussed during the differencing section above, we are sure that there is clear seasonal compoent within the dataset, I set seasonal differencing order to be 1. For normal differencing, I am open to see if 1-order of normal differencing will help the model predict better than without it, so normal differencing is set to either 0 or 1. The orders for AR and MA (both seasonal and normal component) are between 0, 1, 2. I limit the maximum number for any orders to 2 because I would like to keep the model as simple as possible so that the model is more interpretable. 
+```{r}
+
+
+p <- 0:2;  d <- 0:1;  q <- 0:2;  P <- 0:2;  D <- 1;  Q <- 0:2
+comb <- as.matrix(expand.grid(p,d,q,P,D,Q))
+
+aicc_list <- numeric(nrow(comb))
+rmse_list <- numeric(nrow(comb))
+model_arima <- rep(0,nrow(comb))
+mape_list <- numeric(nrow(comb))
+mase_list <- numeric(nrow(comb))
+
+
+for(k in 1:nrow(comb)){
+  
+  arima_model <- try(Arima(train,order=c(comb[k,1], comb[k,2], comb[k,3]),
+                          seasonal=list(order=c(comb[k,4], comb[k,5], comb[k,6]),
+                          period=12), lambda = lambda_t), silent = TRUE)
+  if(!typeof(arima_model) == "character"){
+    arima_model <- Arima(train,order=c(comb[k,1], comb[k,2], comb[k,3]),
+                          seasonal=list(order=c(comb[k,4], comb[k,5], comb[k,6]),
+                          period=12),lambda = lambda_t)
+    fc <- forecast(arima_model ,h = 12)
+    model_arima[k] <- paste("ARIMA", "(", comb[k,1], "," ,  comb[k,2], ",",
+           comb[k,3], ")",  "," , "(",  comb[k,4] ,",", comb[k,5],",", comb[k,6], ")" ,"[12]")
+    
+    aicc_list[k] <- arima_model$aicc
+    rmse_list[k] <- round(accuracy(fc, test)["Test set",2])
+    mape_list[k] <- round(accuracy(fc, test)["Test set",5], 2)
+    mase_list[k] <- round(mase(test, fc$mean), 4)*100
+  }
+  else{
+      print(paste("Error in Model", "ARIMA", "(", comb[k,1], "," ,  comb[k,2], ",",
+           comb[k,3], ")",  "," , "(",  comb[k,4] ,",", comb[k,5],",", comb[k,6], ")" ,"[12]"))
+  }
+}
+
+
+```
+
+```{r}
+arima_table <- as.data.frame(cbind ("ARIMA Model"=model_arima, "AICc" =round(aicc_list,2),
+                                    "rmse"=rmse_list, "mape(%)"=mape_list, "mase(%)" = mase_list ) )
+
+arima_table <- arima_table[!(apply(arima_table, 1, function(y) any(y == 0))),]
+
+arima_table$rmse <- as.numeric(as.character(arima_table$rmse))
+arima_table$`mape(%)` <- as.numeric(as.character(arima_table$`mape(%)`))
+arima_table$`mase(%)` <- as.numeric(as.character(arima_table$`mase(%)`))
+
+arima_table[with(arima_table,order(rmse)),]
+arima_table[with(arima_table,order(`mase(%)`)),]
+
+```
+By running a loop to try different combinations of autoregressive and moving average order and number of normal and seasonal differencing, I found that the best ARIMA model is ARIMA ( 0 , 1 , 1 ) , ( 1 , 1 , 0 ) [12] as it ranks the lowest in test error (using RMSE and MASE metrics).
+
+### Arima Model 3 : (0,1,1)(1,1,0)[12]
+```{r}
+
+fit_arima_3 <-Arima(train,order=c(0,1,1), seasonal=list(order=c(1,1,0),period=12), lambda = lambda_t)
+summary(fit_arima_3)
+checkresiduals(fit_arima_3)
+
+```
+Model Goodness of Fit: Arima Model 3 : (0,1,1)(1,1,0)[12]
+```{r}
+fit_arima_3_fc <- forecast(fit_arima_3 ,h = 12)
+autoplot(fit_arima_3_fc)+ xlab("Year") + ylab("Number of Visitors")
+accuracy(fit_arima_3_fc, test)
+mase(test,fit_arima_3_fc$mean)
+```
+
+```{r}
+arima_eva <- as.data.frame(cbind("Model"=c( "Arima(1,0,0)(0,1,1)[12]", "Auto.Airma","Arima(0,1,1)(1,1,0)[12]"),
+                   
+                    "RMSE" = round( c(accuracy(fit_arima_1_fc, test)["Test set",2] , accuracy(fit_arima_2_fc, test)["Test set",2], 
+                                      accuracy(fit_arima_3_fc, test)["Test set", 2]), 2),
+                    "MAPE(%)" = round( c(accuracy(fit_arima_1_fc, test)["Test set",5] , accuracy(fit_arima_2_fc, test)["Test set",5], 
+                                      accuracy(fit_arima_3_fc, test)["Test set", 5]), 2),
+                    "MASE(%)" = round( c(accuracy(fit_arima_1_fc, test)["Test set",6] , accuracy(fit_arima_2_fc, test)["Test set",6], 
+                                      accuracy(fit_arima_3_fc, test)["Test set", 6]), 2) ))
+
+arima_eva
+
+```
+
+### Regression model 
+
+Getting temperature and gas price data ready
+```{r}
+# weather <- read.csv("/Users/yuanhongzhang/Downloads/2143862.csv")
+# 
+# #extract year and month from DATE
+# weather <- weather %>% mutate(cal_TAVG = (TMAX + TMIN)/2)
+# 
+# weather$date <- format(as.Date(weather$DATE, format = "%Y-%m-%d"),"%Y-%m")
+# 
+# #Do a groupby meaning the monthly values
+# weather_groupby <- weather %>% group_by(date) %>% summarise(mean=mean(cal_TAVG,na.rm=TRUE))
+# 
+# #create temperature dataframe and time series
+# temp_df <- (as.data.frame(weather_groupby))
+# temp_ts <-  ts(temp_df[['mean']] , start=c(1979, 1), end = c(2018,12),frequency=12)
+# 
+# save(temp_df, file= "/Users/yuanhongzhang/Documents/UChicago/Winter 2020/Time Series/Project/temperature_df.Rdata")
+# save(temp_ts, file= "/Users/yuanhongzhang/Documents/UChicago/Winter 2020/Time Series/Project/temperature_ts.Rdata")
+```
+
+#### Introducing predicting variables - temerature and gas price 
+Load temperature data
+```{r}
+load(file= "temperature_df.Rdata")
+load(file= "temperature_ts.Rdata")
+```
+
+```{r}
+#Plot temperature time series
+head(temp_df)
+autoplot(temp_ts)
+
+#Split temperature into train and test set
+temp_train <- temp_df$mean[1:468]
+dim(temp_train) <- c(468,1)
+
+temp_test <- temp_df$mean[469:480]
+dim(temp_test) <- c(12,1)
+```
+
+Load gas price data
+```{r}
+gas_df <- read_excel("gasoline.xlsx")
+head(gas_df)
+```
+
+Split gas price  dataset into train and test and create dataframe and time series object
+```{r}
+gas_train <- gas_df$`Unleaded Regular Gasoline - U.S. City Average Retail Price`[1:468]
+dim(gas_train) <- c(468,1)
+
+gas_test <- gas_df$`Unleaded Regular Gasoline - U.S. City Average Retail Price`[469:480]
+dim(gas_test) <- c(12,1)
+
+gas_ts <- ts(gas_df$`Unleaded Regular Gasoline - U.S. City Average Retail Price` ,  start=c(1979, 1), end = c(2018,12), frequency = 12)
+autoplot(gas_ts)
+gasts_train <- window(gas_ts, start = c(1979, 1), end = c(2017,12), frequency = 12)
+gasts_test <- window(gas_ts, start = c(2017, 1), end = c(2018,12), frequency = 12)
+
+```
+
+
+```{r}
+plot( temp_train, train,type="p" , main ="Number of Visitors vs Temperature", pch = 16,col = "blue", xlab= "temperature", ylab="Number of Visitors")
+
+plot( gas_train,train, type="p" , main ="Number of Visitors vs Gas Price", pch = 16,col = "blue", xlab= "GasPrice", ylab="Number of Visitors")
+
+print("Correlation between Number of Visitors vs Temperature: " )
+cor(train, temp_train)
+
+print("Correlation between Number of Visitors vs Gas Price: " )
+cor(train, gas_train) 
+
+```
+
+combining visitors, temperature and gas price into one single dataframe
+```{r}
+
+training_df <- as.data.frame(cbind(as.numeric(train), temp_train, gas_train))
+test_df <- as.data.frame(cbind(as.numeric(test), temp_test, gas_test))
+
+colnames(training_df) <- c("Visitors","Temperature","GasPrice")
+colnames(test_df) <- c("Visitors","Temperature","GasPrice")
+```
+
+Check correlations between variables
+```{r}
+training_df  %>%
+  GGally::ggpairs(columns = c("Temperature","GasPrice","Visitors"))
+```
+
+```{r}
+# prepare train time series
+training_ts <- ts(data = training_df, start= c(1979,1), end=c(2017,12), frequency = 12)
+test_ts <- ts(data = test_df, start= c(2018,1), end=c(2018,12), frequency = 12)
+head(training_ts)
+```
+
+
+## Model Time Series Linear Model
+
+### TSLM (Visitors vs Temperature)
+```{r}
+#tslm() model - visitors~ temperature
+fit_tslm_temp <- tslm(Visitors~Temperature, data = training_ts)
+summary(fit_tslm_temp)
+```
+```{r}
+plot(temp_train, train, type="p" , main ="Number of Visitors vs Temperature", pch = 16, col = "blue", xlab= "temperature", ylab="Number of Visitors")
+abline(fit_tslm_temp$coefficients[1],fit_tslm_temp$coefficients[2], lwd=2)
+checkresiduals(fit_tslm_temp, test="LB")
+```
+
+```{r}
+fc_tslm_temp <- forecast(fit_tslm_temp, newdata=data.frame(Temperature = test_ts[,"Temperature"]), h=12)
+plot(fc_tslm_temp)
+accuracy(fc_tslm_temp, test)
+```
+### TSLM (Visitors vs Gas Price)
+```{r}
+fit_tslm_gas <- tslm(Visitors~GasPrice, data = training_ts)
+
+summary(fit_tslm_gas)
+
+plot( gas_train, train, type="p" , main ="Number of Visitors vs Gas Price", pch = 16, col = "blue", xlab= "Gas Price", ylab="Number of Visitors")
+abline(fit_tslm_gas$coefficients[1],fit_tslm_temp$coefficients[2], lwd=2)
+
+checkresiduals(fit_tslm_gas, test="LB")
+```
+
+```{r}
+fc_tslm_gas <- forecast(fit_tslm_gas, newdata=data.frame(GasPrice = test_ts[,"GasPrice"]), h=12)
+plot(fc_tslm_gas)
+accuracy(fc_tslm_gas, test)
+```
+
+### TSLM (Visitors vs Temperature + Gas Price)
+```{r}
+fit_tslm_both <- tslm(Visitors~Temperature+GasPrice, data = training_ts)
+summary(fit_tslm_both)
+checkresiduals(fit_tslm_both, test="LB")
+
+```
+
+```{r}
+fc_tslm_both <- forecast(fit_tslm_both, newdata=data.frame(Temperature = test_ts[,"Temperature"],GasPrice= test_ts[,"GasPrice"]), h=12)
+plot(fc_tslm_both)
+accuracy(fc_tslm_both, test)
+```
+
+Inspecting the residuals of the three LSTM models,  we can see that there are still time series components within the residuals of TSLM (time series linear model), we can proceed to ARIMAX model. 
+
+```{r}
+tslm_eva <- as.data.frame(cbind("Model"=c( "TSLM (Visitors vs Temperature) ", "TSLM (Visitors vs Gas Price) ","TSLM (Visitors vs Temperature + Gas Price) "),
+                   
+                    "RMSE" = round( c(accuracy(fc_tslm_temp, test)["Test set",2] , accuracy(fc_tslm_gas, test)["Test set",2], 
+                                      accuracy(fc_tslm_both, test)["Test set", 2]), 2),
+                    "MAPE(%)" = round( c(accuracy(fc_tslm_temp, test)["Test set",5] , accuracy(fc_tslm_gas, test)["Test set",5], 
+                                      accuracy(fc_tslm_both, test)["Test set", 5]), 2),
+                    "MASE(%)" = round( c(accuracy(fc_tslm_temp, test)["Test set",6] , accuracy(fc_tslm_gas, test)["Test set",6], 
+                                      accuracy(fc_tslm_both, test)["Test set", 6]), 2) ))
+
+tslm_eva
+
+```
+
+
+
+## ArimaX (regression)
+
+Prepare xreg for Arimax
+```{r}
+xreg_train <- cbind(temp_train, gas_train)
+xreg_test <- cbind(temp_test, gas_test)
+```
+
+### Build ARIMAX with auto.arima 
+#### ARIMAX with auto.arima model (xreg = Temperature and Gas Price)
+```{r}
+# xreg = Temperature and gas price
+fit_autoarimax_gas_temp <- auto.arima(y = train, D=1,  stepwise=FALSE , approximation=FALSE,xreg =xreg_train,  seasonal = TRUE , lambda = lambda_t)
+summary(fit_autoarimax_gas_temp)
+```
+
+```{r}
+print( "p-values of model parameters" )
+(1-pnorm(abs(fit_autoarimax_gas_temp$coef)/sqrt(diag(fit_autoarimax_gas_temp$var.coef))))*2
+checkresiduals(fit_autoarimax_gas_temp)
+```
+#### ARIMAX (xreg = Temperature)
+```{r}
+fit_autoarimax_temp <- auto.arima(y = train, D=1,  xreg =temp_train, stepwise=FALSE , approximation=FALSE,  seasonal = TRUE , lambda = lambda_t )
+summary(fit_autoarimax_temp)
+```
+
+```{r}
+print( "p-values of model parameters" )
+(1-pnorm(abs(fit_autoarimax_temp$coef)/sqrt(diag(fit_autoarimax_temp$var.coef))))*2
+checkresiduals(fit_autoarimax_temp)
+```
+
+
+#### ARIMAX (xreg = Gas)
+```{r}
+fit_autoarimax_gas <- auto.arima(y = train, D=1,  xreg =gas_train, stepwise=FALSE , approximation=FALSE,  seasonal = TRUE , lambda = lambda_t )
+summary(fit_autoarimax_gas)
+```
+
+```{r}
+print( "p-values of model parameters" )
+(1-pnorm(abs(fit_autoarimax_gas$coef)/sqrt(diag(fit_autoarimax_gas$var.coef))))*2
+checkresiduals(fit_autoarimax_gas)
+```
+ 
+Evaluate model fitness for ARIMAX auto.arima
+```{r}
+fc_autoarimax_gas_temp <- forecast(fit_autoarimax_gas_temp, xreg = xreg_test, h=12)
+autoplot(fc_autoarimax_gas_temp ) + xlab("Month") + ylab("Average Visitors")
+
+fc_autoarimax_temp <- forecast(fit_autoarimax_temp, xreg = temp_test, h=12)
+autoplot(fc_autoarimax_temp ) + xlab("Month") + ylab("Average Visitors")
+
+fc_autoarimax_gas <- forecast(fit_autoarimax_gas, xreg = gas_test, h=12)
+autoplot(fc_autoarimax_gas ) + xlab("Month") + ylab("Average Visitors")
+```
+
+```{r}
+auto_arimax_eva <- as.data.frame(cbind("Model"=c( "auto.airmax (Visitors vs Temperature) ", "auto.airmax (Visitors vs Gas Price) ","auto.airmax (Visitors vs Temperature + Gas Price) "),
+                   
+                    "RMSE" = round( c(accuracy(fc_autoarimax_temp, test)["Test set",2] , accuracy(fc_autoarimax_gas, test)["Test set",2], 
+                                      accuracy(fc_autoarimax_gas_temp, test)["Test set", 2]), 2),
+                    "MAPE(%)" = round( c(accuracy(fc_autoarimax_temp, test)["Test set",5] , accuracy(fc_autoarimax_gas, test)["Test set",5], 
+                                      accuracy(fc_autoarimax_gas_temp, test)["Test set", 5]), 2),
+                    "MASE(%)" = round( c(accuracy(fc_autoarimax_temp, test)["Test set",6] , accuracy(fc_autoarimax_gas, test)["Test set",6], 
+                                      accuracy(fc_autoarimax_gas_temp, test)["Test set", 6]), 2) ))
+
+auto_arimax_eva
+
+```
+
+### ARIMAX( 0 , 1 , 1 ) , ( 1 , 1 , 0 ) [12]
+Second ARIMAX model with the order from the best ARIMA model selected above : ARIMA( 0 , 1 , 1 ) , ( 1 , 1 , 0 ) [12]
+
+#### ARIMAX( 0 , 1 , 1 ) , ( 1 , 1 , 0 ) [12] xreg = Temperature and gas price
+```{r}
+
+fit_Arimax_gas_temp <- Arima(y = train, order = c(0,1,1), seasonal = list(order = c(1,1,0),  period = 12), xreg =xreg_train,   lambda = lambda_t)
+summary(fit_Arimax_gas_temp)
+```
+
+```{r}
+# check p-values of model parameters
+(1-pnorm(abs(fit_Arimax_gas_temp$coef)/sqrt(diag(fit_Arimax_gas_temp$var.coef))))*2
+
+checkresiduals(fit_Arimax_gas_temp)
+```
+
+#### ARIMAX( 0 , 1 , 1 ) , ( 1 , 1 , 0 ) [12] xreg = Temperature 
+```{r}
+# xreg = Temperature only
+fit_Arimax_temp <- Arima(y = train, order = c(0,1,1), seasonal = list(order = c(1,1,0),  period = 12),  xreg =temp_train,  lambda = lambda_t)
+summary(fit_Arimax_temp)
+```
+
+```{r}
+# check p-values of model parameters
+(1-pnorm(abs(fit_Arimax_temp$coef)/sqrt(diag(fit_Arimax_temp$var.coef))))*2
+checkresiduals(fit_Arimax_temp)
+```
+
+#### ARIMAX( 0 , 1 , 1 ) , ( 1 , 1 , 0 ) [12] xreg = gas price
+```{r}
+
+fit_Arimax_gas <- Arima(y = train, order = c(0,1,1), seasonal = list(order = c(1,1,0),  period = 12),  xreg =gas_train,  lambda = lambda_t )
+summary(fit_Arimax_gas)
+```
+
+```{r}
+# check p-values of model parameters
+(1-pnorm(abs(fit_Arimax_gas$coef)/sqrt(diag(fit_Arimax_gas$var.coef))))*2
+checkresiduals(fit_Arimax_gas)
+```
+
+Evaluate ARIMAX modesls(( 0 , 1 , 1 ) , ( 1 , 1 , 0 ) [12]) on test dataset
+
+```{r}
+fc_Arimax_gas_temp <- forecast(fit_Arimax_gas_temp, xreg = xreg_test, h=12)
+autoplot(fc_Arimax_gas_temp ) + xlab("Month") + ylab("Average Visitors")
+
+fc_Arimax_temp <- forecast(fit_Arimax_temp, xreg = temp_test, h=12)
+autoplot(fc_Arimax_temp ) + xlab("Month") + ylab("Average Visitors")
+
+fc_Arimax_gas <- forecast(fit_Arimax_gas, xreg = gas_test, h=12)
+autoplot(fc_Arimax_gas ) + xlab("Month") + ylab("Average Visitors")
+
+```
+
+Model fitness evaluation summary
+```{r}
+Arimax_eva <- as.data.frame(cbind("Model"=c( "ARIMAX(0,1,1)(1,1,0)[12] (Visitors vs Temperature) ", "ARIMAX(0,1,1)(1,1,0)[12] (Visitors vs Gas Price) ","ARIMAX(0,1,1)(1,1,0)[12] (Visitors vs Temperature + Gas Price) "),
+                   
+                    "RMSE" = round( c(accuracy(fc_Arimax_temp, test)["Test set",2] , accuracy(fc_Arimax_gas, test)["Test set",2], 
+                                      accuracy(fc_Arimax_gas_temp, test)["Test set", 2]), 2),
+                    "MAPE(%)" = round( c(accuracy(fc_Arimax_temp, test)["Test set",5] , accuracy(fc_Arimax_gas, test)["Test set",5], 
+                                      accuracy(fc_Arimax_gas_temp, test)["Test set", 5]), 2),
+                    "MASE(%)" = round( c(accuracy(fc_Arimax_temp, test)["Test set",6] , accuracy(fc_Arimax_gas, test)["Test set",6], 
+                                      accuracy(fc_Arimax_gas_temp, test)["Test set", 6]), 2) ))
+
+Arimax_eva
+
+```
+
+```{r}
+arimx_table <- rbind(Arimax_eva, auto_arimax_eva)
+arimx_table
+```
+
+# Conclusion
+From the summary of prediction errors of 8 models below, noted the ARIMAX(0,1,1)(1,1,0)[12] model with gas and temperature as predicting variables has the lowest RMSE, and therefore its the best model
+```{r}
+
+modelname <- c("snaive",
+               "Holt-Winters' Multi Damped", 
+               "ETS(A,N,A) Box-Cox",
+               "Arima(0,1,1)(1,1,0)[12]",
+               "auto.airmax(Temperature)",
+               "ARIMAX(0,1,1)(1,1,0)[12](Temperature)", 
+               "ARIMAX(0,1,1)(1,1,0)[12](Gas Price)",
+               "ARIMAX(0,1,1)(1,1,0)[12](Temperature + Gas Price)")
+
+eva_final <- as.data.frame( cbind (modelname ,
+              "RMSE"= round(c(accuracy(fc.snaive, test)["Test set",2], 
+                              accuracy(fit_hwmd, test)["Test set",2],
+                              accuracy(fc_ets_t, test)["Test set", 2],
+                              accuracy(fit_arima_3_fc, test)["Test set", 2],
+                              accuracy(fc_autoarimax_temp, test)["Test set",2],
+                              accuracy(fc_Arimax_temp, test)["Test set",2] ,
+                              accuracy(fc_Arimax_gas, test)["Test set",2], 
+                              accuracy(fc_Arimax_gas_temp, test)["Test set", 2]),2),
+              
+               "MAPE(%)"= round(c(accuracy(fc.snaive, test)["Test set",5], 
+                              accuracy(fit_hwmd, test)["Test set",5],
+                              accuracy(fc_ets_t, test)["Test set", 5],
+                              accuracy(fit_arima_3_fc, test)["Test set", 5],
+                              accuracy(fc_autoarimax_temp, test)["Test set",5],
+                              accuracy(fc_Arimax_temp, test)["Test set",5] , 
+                              accuracy(fc_Arimax_gas, test)["Test set",5], 
+                              accuracy(fc_Arimax_gas_temp, test)["Test set", 5]),2),
+              
+               "MASE(%)"= round(c(accuracy(fc.snaive, test)["Test set",6], 
+                              accuracy(fit_hwmd, test)["Test set",6],
+                              accuracy(fc_ets_t, test)["Test set", 6],
+                              accuracy(fit_arima_3_fc, test)["Test set", 6],
+                              accuracy(fc_autoarimax_temp, test)["Test set",6],
+                              accuracy(fc_Arimax_temp, test)["Test set",6] , 
+                              accuracy(fc_Arimax_gas, test)["Test set",6], 
+                              accuracy(fc_Arimax_gas_temp, test)["Test set", 6]),2)
+              ))
+
+
+
+eva_final
+```
+
+
+
